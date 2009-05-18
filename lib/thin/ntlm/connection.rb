@@ -1,4 +1,3 @@
-require 'thin/connection'
 require 'win32/sspi/server'
 
 module Thin

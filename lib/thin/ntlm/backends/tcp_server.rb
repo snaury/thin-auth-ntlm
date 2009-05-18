@@ -1,9 +1,10 @@
-require 'thin/ntlm/connection'
-require 'thin/backends/tcp_server'
-
 module Thin
   module Backends
-    class TcpServer
+    class NTLMTcpServer < TcpServer
+      def initialize(host, port, options)
+        super(host, port)
+      end
+
       def connect
         @signature = EventMachine.start_server(@host, @port, NTLMConnection, &method(:initialize_connection))
       end

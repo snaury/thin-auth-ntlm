@@ -5,7 +5,7 @@ require 'rake/testtask'
 spec = Gem::Specification.new do |s|
   s.platform = Gem::Platform::RUBY
   s.name = "thin-auth-ntlm"
-  s.version = "0.0.1"
+  s.version = "0.0.2"
   s.summary = "Allows you to force NTLM authentication on Thin TCP servers."
 
   s.add_dependency('thin', '>= 1.0.0')
