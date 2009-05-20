@@ -6,7 +6,7 @@ Gem::Specification.new do |s|
 
   s.required_rubygems_version = Gem::Requirement.new(">= 0") if s.respond_to? :required_rubygems_version=
   s.authors = ["Alexey Borzenkov"]
-  s.date = %q{2009-05-18}
+  s.date = %q{2009-05-20}
   s.email = %q{snaury@gmail.com}
   s.extra_rdoc_files = [
     "LICENSE.txt",
@@ -16,9 +16,11 @@ Gem::Specification.new do |s|
     "LICENSE.txt",
      "README.txt",
      "Rakefile",
+     "VERSION.yml",
      "lib/thin-auth-ntlm.rb",
      "lib/thin/ntlm/backends/tcp_server.rb",
-     "lib/thin/ntlm/connection.rb"
+     "lib/thin/ntlm/connection.rb",
+     "thin-auth-ntlm.gemspec"
   ]
   s.has_rdoc = true
   s.rdoc_options = ["--charset=UTF-8"]
