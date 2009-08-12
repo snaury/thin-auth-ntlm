@@ -2,25 +2,7 @@ require 'weakref'
 require 'win32/sspi/server'
 
 module Thin
-  class NTLMConnection < Connection
-    class NTLMWrapper
-      attr_reader :app
-      attr_reader :connection
-
-      def initialize(app, connection)
-        @app = app
-        @connection = WeakRef.new(connection)
-      end
-
-      def call(env)
-        @connection.ntlm_wrap(env, @app)
-      end
-
-      def deferred?(env)
-        @app.respond_to?(:deferred?) && @app.deferred?(env)
-      end
-    end
-
+  class NTLMWrapper
     AUTHORIZATION_MESSAGE = <<END
 <!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
 <html><head>
@@ -43,39 +25,36 @@ END
     NTLM_REQUEST_PACKAGE = 'NTLM'.freeze
     NTLM_ALLOWED_PACKAGE = 'NTLM|Negotiate'.freeze
 
-    def app=(app)
-      super NTLMWrapper.new(app, self)
+    def initialize(app, connection)
+      @app = app
+      @connection = WeakRef.new(connection)
     end
 
-    def unbind
-      ntlm_cleanup
-    ensure
-      super
+    def deferred?(env)
+      @app.respond_to?(:deferred?) && @app.deferred?(env)
     end
 
-    def ntlm_wrap(env, app)
+    def call(env)
       # check if browser wants to reauthenticate
       if @authenticated_as && http_authorization(env)
-        @post_ntlm_can_persist = @can_persist
         @authenticated_as = nil
       end
 
       # require authentication
       unless @authenticated_as
-        unless @authentication_stage
-          @post_ntlm_can_persist = @can_persist
-          @authentication_stage = 1
-        end
-        result = ntlm_process(env)
+        @connection.ntlm_start
+        @authentication_stage ||= 1
+        result = process(env)
         return result unless @authenticated_as
-        @can_persist = @post_ntlm_can_persist
+        @connection.ntlm_stop
       end
 
       # pass thru
       env[REMOTE_USER] = @authenticated_as
-      app.call(env)
+      @app.call(env)
     end
 
+    # Returns stripped HTTP-Authorization header, nil if none or empty
     def http_authorization(env)
       auth = env[HTTP_AUTHORIZATION]
       if auth
@@ -85,14 +64,23 @@ END
       auth
     end
 
-    def ntlm_acquire(package = 'NTLM')
-      ntlm_cleanup
+    # Returns token type and value from HTTP-Authorization header
+    def token(env)
+      auth = http_authorization(env)
+      return [nil, nil] unless auth && auth.match(/\A(#{NTLM_ALLOWED_PACKAGE}) (.*)\Z/)
+      [$1, Base64.decode64($2.strip)]
+    end
+
+    # Acquires new OS credentials handle
+    def acquire(package = 'NTLM')
+      cleanup
       @ntlm = Win32::SSPI::NegotiateServer.new(package)
       @ntlm.acquire_credentials_handle
       @ntlm
     end
 
-    def ntlm_cleanup
+    # Frees credentials handle, if acquired
+    def cleanup
       if @ntlm
         @ntlm.cleanup rescue nil
         @ntlm = nil
@@ -100,51 +88,77 @@ END
       nil
     end
 
-    def ntlm_token(env)
-      auth = http_authorization(env)
-      return [nil, nil] unless auth && auth.match(/\A(#{NTLM_ALLOWED_PACKAGE}) (.*)\Z/)
-      [$1, Base64.decode64($2.strip)]
-    end
-
-    def ntlm_process(env)
+    # Processes current authentication stage
+    # Returns rack response if authentication is incomplete
+    # Sets @authenticated_as to username if authentication successful
+    def process(env)
       case @authentication_stage
       when 1 # we are waiting for type1 message
-        package, t1 = ntlm_token(env)
-        return ntlm_request_auth(NTLM_REQUEST_PACKAGE, false) if t1.nil?
-        return ntlm_request_auth unless request.persistent?
+        package, t1 = token(env)
+        return request_auth(NTLM_REQUEST_PACKAGE, false) if t1.nil?
+        return request_auth unless request.persistent?
         begin
-          ntlm_acquire(package)
+          acquire(package)
           t2 = @ntlm.accept_security_context(t1)
         rescue
-          return ntlm_request_auth
+          return request_auth
         end
-        ntlm_request_auth("#{package} #{t2}", false, 2)
+        request_auth("#{package} #{t2}", false, 2)
       when 2 # we are waiting for type3 message
-        package, t3 = ntlm_token(env)
-        return ntlm_request_auth(NTLM_REQUEST_PACKAGE, false) if t3.nil?
-        return ntlm_request_auth unless package == @ntlm.package
-        return ntlm_request_auth unless request.persistent?
+        package, t3 = token(env)
+        return request_auth(NTLM_REQUEST_PACKAGE, false) if t3.nil?
+        return request_auth unless package == @ntlm.package
+        return request_auth unless request.persistent?
         begin
           t2 = @ntlm.accept_security_context(t3)
           @authenticated_as = @ntlm.get_username_from_context
-          @authentication_stage = 1 # in case IE8 wants to reauthenticate
+          @authentication_stage = nil # in case IE wants to reauthenticate
         rescue
-          return ntlm_request_auth
+          return request_auth
         end
-        return ntlm_request_auth unless @authenticated_as
-        ntlm_cleanup
+        return request_auth unless @authenticated_as
+        cleanup
       else
         raise "Invalid value for @authentication_stage=#{@authentication_stage} detected"
       end
     end
 
-    def ntlm_request_auth(auth = nil, finished = true, next_stage = 1)
+    # Returns response with authentication request to the client
+    def request_auth(auth = nil, finished = true, next_stage = 1)
       @authentication_stage = next_stage
-      can_persist! unless finished
+      @connection.can_persist! unless finished
       head = {}
       head[WWW_AUTHENTICATE] = auth if auth
       head[CONTENT_TYPE] = CONTENT_TYPE_AUTH
       [401, head, [AUTHORIZATION_MESSAGE]]
+    end
+  end
+
+  class NTLMConnection < Connection
+    def app=(app)
+      super NTLMWrapper.new(app, self)
+    end
+
+    def unbind
+      @app.cleanup if @app && @app.respond_to?(:cleanup)
+    ensure
+      super
+    end
+
+    # Saves original can_persist? value (NTLM will force persistence)
+    def ntlm_start
+      unless @ntlm_in_progress
+        @ntlm_saved_can_persist = @can_persist
+        @ntlm_in_progress = true
+      end
+    end
+
+    # Restores previous can_persist? value
+    def ntlm_stop
+      if @ntlm_in_progress
+        @can_persist = @ntlm_saved_can_persist
+        @ntlm_in_progress = false
+      end
     end
   end
 end
