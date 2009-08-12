@@ -1,7 +1,26 @@
+require 'weakref'
 require 'win32/sspi/server'
 
 module Thin
   class NTLMConnection < Connection
+    class NTLMWrapper
+      attr_reader :app
+      attr_reader :connection
+
+      def initialize(app, connection)
+        @app = app
+        @connection = WeakRef.new(connection)
+      end
+
+      def call(env)
+        @connection.ntlm_wrap(env, @app)
+      end
+
+      def deferred?(env)
+        @app.respond_to?(:deferred?) && @app.deferred?(env)
+      end
+    end
+
     AUTHORIZATION_MESSAGE = <<END
 <!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
 <html><head>
@@ -24,34 +43,41 @@ END
     NTLM_REQUEST_PACKAGE = 'NTLM'.freeze
     NTLM_ALLOWED_PACKAGE = 'NTLM|Negotiate'.freeze
 
+    def app=(app)
+      super NTLMWrapper.new(app, self)
+    end
+
     def unbind
       ntlm_cleanup
     ensure
       super
     end
 
-    def process
+    def ntlm_wrap(env, app)
       # check if browser wants to reauthenticate
-      if @authenticated_as && http_authorization
+      if @authenticated_as && http_authorization(env)
+        @post_ntlm_can_persist = @can_persist
         @authenticated_as = nil
       end
+
       # require authentication
       unless @authenticated_as
         unless @authentication_stage
           @post_ntlm_can_persist = @can_persist
           @authentication_stage = 1
         end
-        result = ntlm_process
-        return post_process(result) unless @authenticated_as
+        result = ntlm_process(env)
+        return result unless @authenticated_as
+        @can_persist = @post_ntlm_can_persist
       end
 
-      @request.env[REMOTE_USER] = @authenticated_as
-      @can_persist = @post_ntlm_can_persist
-      return super
+      # pass thru
+      env[REMOTE_USER] = @authenticated_as
+      app.call(env)
     end
 
-    def http_authorization
-      auth = @request.env[HTTP_AUTHORIZATION]
+    def http_authorization(env)
+      auth = env[HTTP_AUTHORIZATION]
       if auth
         auth = auth.strip
         auth = nil if auth.empty?
@@ -74,16 +100,16 @@ END
       nil
     end
 
-    def ntlm_token
-      auth = http_authorization
+    def ntlm_token(env)
+      auth = http_authorization(env)
       return [nil, nil] unless auth && auth.match(/\A(#{NTLM_ALLOWED_PACKAGE}) (.*)\Z/)
       [$1, Base64.decode64($2.strip)]
     end
 
-    def ntlm_process
+    def ntlm_process(env)
       case @authentication_stage
       when 1 # we are waiting for type1 message
-        package, t1 = ntlm_token
+        package, t1 = ntlm_token(env)
         return ntlm_request_auth(NTLM_REQUEST_PACKAGE, false) if t1.nil?
         return ntlm_request_auth unless request.persistent?
         begin
@@ -94,7 +120,7 @@ END
         end
         ntlm_request_auth("#{package} #{t2}", false, 2)
       when 2 # we are waiting for type3 message
-        package, t3 = ntlm_token
+        package, t3 = ntlm_token(env)
         return ntlm_request_auth(NTLM_REQUEST_PACKAGE, false) if t3.nil?
         return ntlm_request_auth unless package == @ntlm.package
         return ntlm_request_auth unless request.persistent?
@@ -110,19 +136,15 @@ END
       else
         raise "Invalid value for @authentication_stage=#{@authentication_stage} detected"
       end
-    rescue Exception
-      handle_error
-      terminate_request
-      nil
     end
 
     def ntlm_request_auth(auth = nil, finished = true, next_stage = 1)
       @authentication_stage = next_stage
-      @can_persist = !finished
+      can_persist! unless finished
       head = {}
       head[WWW_AUTHENTICATE] = auth if auth
       head[CONTENT_TYPE] = CONTENT_TYPE_AUTH
-      return [401, head, [AUTHORIZATION_MESSAGE]]
+      [401, head, [AUTHORIZATION_MESSAGE]]
     end
   end
 end
