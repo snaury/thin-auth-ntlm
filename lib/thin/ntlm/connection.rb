@@ -34,6 +34,22 @@ END
       @app.respond_to?(:deferred?) && @app.deferred?(env)
     end
 
+    def persistent?
+      @connection.request.persistent?
+    end
+
+    def can_persist!
+      @connection.can_persist!
+    end
+
+    def ntlm_start
+      @connection.ntlm_start
+    end
+
+    def ntlm_stop
+      @connection.ntlm_stop
+    end
+
     def call(env)
       # check if browser wants to reauthenticate
       if @authenticated_as && http_authorization(env)
@@ -42,11 +58,11 @@ END
 
       # require authentication
       unless @authenticated_as
-        @connection.ntlm_start
+        ntlm_start
         @authentication_stage ||= 1
         result = process(env)
         return result unless @authenticated_as
-        @connection.ntlm_stop
+        ntlm_stop
       end
 
       # pass thru
@@ -96,7 +112,7 @@ END
       when 1 # we are waiting for type1 message
         package, t1 = token(env)
         return request_auth(NTLM_REQUEST_PACKAGE, false) if t1.nil?
-        return request_auth unless request.persistent?
+        return request_auth unless persistent?
         begin
           acquire(package)
           t2 = @ntlm.accept_security_context(t1)
@@ -108,7 +124,7 @@ END
         package, t3 = token(env)
         return request_auth(NTLM_REQUEST_PACKAGE, false) if t3.nil?
         return request_auth unless package == @ntlm.package
-        return request_auth unless request.persistent?
+        return request_auth unless persistent?
         begin
           t2 = @ntlm.accept_security_context(t3)
           @authenticated_as = @ntlm.get_username_from_context
@@ -126,7 +142,7 @@ END
     # Returns response with authentication request to the client
     def request_auth(auth = nil, finished = true, next_stage = 1)
       @authentication_stage = next_stage
-      @connection.can_persist! unless finished
+      can_persist! unless finished
       head = {}
       head[WWW_AUTHENTICATE] = auth if auth
       head[CONTENT_TYPE] = CONTENT_TYPE_AUTH
