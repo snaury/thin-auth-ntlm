@@ -3,7 +3,7 @@ require 'win32/sspi/server'
 
 module Thin
   class NTLMWrapper
-    AUTHORIZATION_MESSAGE = <<END
+    AUTHORIZATION_MESSAGE = <<END.freeze
 <!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
 <html><head>
 <title>401 NTLM Authorization Required</title>
@@ -17,11 +17,13 @@ browser doesn't understand how to supply
 the credentials required.</p>
 </body></html>
 END
+    AUTHORIZATION_MESSAGE_LENGTH = AUTHORIZATION_MESSAGE.size.to_s.freeze
     REMOTE_USER = 'REMOTE_USER'.freeze
     HTTP_AUTHORIZATION = 'HTTP_AUTHORIZATION'.freeze
     WWW_AUTHENTICATE = 'WWW-Authenticate'.freeze
     CONTENT_TYPE = 'Content-Type'.freeze
     CONTENT_TYPE_AUTH = 'text/html; charset=iso-8859-1'.freeze
+    CONTENT_LENGTH = 'Content-Length'.freeze
     NTLM_REQUEST_PACKAGE = 'NTLM'.freeze
     NTLM_ALLOWED_PACKAGE = 'NTLM|Negotiate'.freeze
 
@@ -146,6 +148,7 @@ END
       head = {}
       head[WWW_AUTHENTICATE] = auth if auth
       head[CONTENT_TYPE] = CONTENT_TYPE_AUTH
+      head[CONTENT_LENGTH] = AUTHORIZATION_MESSAGE_LENGTH
       [401, head, [AUTHORIZATION_MESSAGE]]
     end
   end
